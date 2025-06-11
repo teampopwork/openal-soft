@@ -30,12 +30,13 @@
 #include <mmsystem.h>
 #include <mmreg.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
+#include <ranges>
+#include <string>
 #include <thread>
 #include <vector>
-#include <string>
-#include <algorithm>
 
 #include "alnumeric.h"
 #include "althrd_setname.h"
@@ -63,13 +64,13 @@ void ProbePlaybackDevices()
 {
     PlaybackDevices.clear();
 
-    UINT numdevs{waveOutGetNumDevs()};
+    const auto numdevs = waveOutGetNumDevs();
     PlaybackDevices.reserve(numdevs);
-    for(UINT i{0};i < numdevs;++i)
+    for(const auto i : std::views::iota(0u, numdevs))
     {
-        std::string dname;
+        auto dname = std::string{};
 
-        WAVEOUTCAPSW WaveCaps{};
+        auto WaveCaps = WAVEOUTCAPSW{};
         if(waveOutGetDevCapsW(i, &WaveCaps, sizeof(WaveCaps)) == MMSYSERR_NOERROR)
         {
             const auto basename = wstr_to_utf8(std::data(WaveCaps.szPname));
@@ -90,13 +91,13 @@ void ProbeCaptureDevices()
 {
     CaptureDevices.clear();
 
-    UINT numdevs{waveInGetNumDevs()};
+    const auto numdevs = waveInGetNumDevs();
     CaptureDevices.reserve(numdevs);
-    for(UINT i{0};i < numdevs;++i)
+    for(const auto i : std::views::iota(0u, numdevs))
     {
-        std::string dname;
+        auto dname = std::string{};
 
-        WAVEINCAPSW WaveCaps{};
+        auto WaveCaps = WAVEINCAPSW{};
         if(waveInGetDevCapsW(i, &WaveCaps, sizeof(WaveCaps)) == MMSYSERR_NOERROR)
         {
             const auto basename = wstr_to_utf8(std::data(WaveCaps.szPname));
@@ -120,7 +121,7 @@ struct WinMMPlayback final : public BackendBase {
 
     void CALLBACK waveOutProc(HWAVEOUT device, UINT msg, DWORD_PTR param1, DWORD_PTR param2) noexcept;
     static void CALLBACK waveOutProcC(HWAVEOUT device, UINT msg, DWORD_PTR instance, DWORD_PTR param1, DWORD_PTR param2) noexcept
-    { reinterpret_cast<WinMMPlayback*>(instance)->waveOutProc(device, msg, param1, param2); }
+    { std::bit_cast<WinMMPlayback*>(instance)->waveOutProc(device, msg, param1, param2); }
 
     int mixerProc();
 
@@ -228,8 +229,8 @@ void WinMMPlayback::open(std::string_view name)
         format.cbSize = 0;
 
         MMRESULT res{waveOutOpen(&mOutHdl, DeviceID, &format,
-            reinterpret_cast<DWORD_PTR>(&WinMMPlayback::waveOutProcC),
-            reinterpret_cast<DWORD_PTR>(this), CALLBACK_FUNCTION)};
+            std::bit_cast<DWORD_PTR>(&WinMMPlayback::waveOutProcC),
+            std::bit_cast<DWORD_PTR>(this), CALLBACK_FUNCTION)};
         if(res == MMSYSERR_NOERROR) break;
 
         if(fmttype != DevFmtFloat)
@@ -357,24 +358,24 @@ struct WinMMCapture final : public BackendBase {
 
     void CALLBACK waveInProc(HWAVEIN device, UINT msg, DWORD_PTR param1, DWORD_PTR param2) noexcept;
     static void CALLBACK waveInProcC(HWAVEIN device, UINT msg, DWORD_PTR instance, DWORD_PTR param1, DWORD_PTR param2) noexcept
-    { reinterpret_cast<WinMMCapture*>(instance)->waveInProc(device, msg, param1, param2); }
+    { std::bit_cast<WinMMCapture*>(instance)->waveInProc(device, msg, param1, param2); }
 
-    int captureProc();
+    void captureProc();
 
     void open(std::string_view name) override;
     void start() override;
     void stop() override;
-    void captureSamples(std::byte *buffer, uint samples) override;
-    uint availableSamples() override;
+    void captureSamples(std::span<std::byte> outbuffer) override;
+    auto availableSamples() -> uint override;
 
     std::atomic<uint> mReadable{0u};
-    uint mIdx{0};
+    uint mIdx{0u};
     std::array<WAVEHDR,4> mWaveBuffer{};
     al::vector<char,16> mBuffer;
 
     HWAVEIN mInHdl{nullptr};
 
-    RingBufferPtr mRing{nullptr};
+    RingBufferPtr<std::byte> mRing;
 
     WAVEFORMATEX mFormat{};
 
@@ -402,7 +403,7 @@ void CALLBACK WinMMCapture::waveInProc(HWAVEIN, UINT msg, DWORD_PTR, DWORD_PTR) 
     mReadable.notify_all();
 }
 
-int WinMMCapture::captureProc()
+void WinMMCapture::captureProc()
 {
     althrd_setname(GetRecordThreadName());
 
@@ -415,19 +416,17 @@ int WinMMCapture::captureProc()
         auto widx = size_t{mIdx};
         while(todo > 0)
         {
-            WAVEHDR &waveHdr = mWaveBuffer[widx];
+            auto &waveHdr = mWaveBuffer[widx];
             widx = (widx+1) % mWaveBuffer.size();
 
-            std::ignore = mRing->write(waveHdr.lpData,
-                waveHdr.dwBytesRecorded / mFormat.nBlockAlign);
+            std::ignore = mRing->write(std::as_bytes(std::span{waveHdr.lpData,
+                waveHdr.dwBytesRecorded}));
             mReadable.fetch_sub(1, std::memory_order_acq_rel);
             waveInAddBuffer(mInHdl, &waveHdr, sizeof(WAVEHDR));
             --todo;
         }
         mIdx = static_cast<uint>(widx);
     }
-
-    return 0;
 }
 
 
@@ -437,13 +436,11 @@ void WinMMCapture::open(std::string_view name)
         ProbeCaptureDevices();
 
     // Find the Device ID matching the deviceName if valid
-    auto iter = !name.empty() ?
-        std::find(CaptureDevices.cbegin(), CaptureDevices.cend(), name) :
-        CaptureDevices.cbegin();
+    auto iter = !name.empty() ? std::ranges::find(CaptureDevices, name) : CaptureDevices.begin();
     if(iter == CaptureDevices.cend())
         throw al::backend_exception{al::backend_error::NoDevice, "Device name \"{}\" not found",
             name};
-    auto DeviceID = static_cast<UINT>(std::distance(CaptureDevices.cbegin(), iter));
+    auto DeviceID = static_cast<UINT>(std::distance(CaptureDevices.begin(), iter));
 
     switch(mDevice->FmtChans)
     {
@@ -491,14 +488,14 @@ void WinMMCapture::open(std::string_view name)
     mFormat.nAvgBytesPerSec = mFormat.nSamplesPerSec * mFormat.nBlockAlign;
     mFormat.cbSize = 0;
 
-    MMRESULT res{waveInOpen(&mInHdl, DeviceID, &mFormat,
-        reinterpret_cast<DWORD_PTR>(&WinMMCapture::waveInProcC),
-        reinterpret_cast<DWORD_PTR>(this), CALLBACK_FUNCTION)};
+    auto res = waveInOpen(&mInHdl, DeviceID, &mFormat,
+        std::bit_cast<DWORD_PTR>(&WinMMCapture::waveInProcC),
+        std::bit_cast<DWORD_PTR>(this), CALLBACK_FUNCTION);
     if(res != MMSYSERR_NOERROR)
         throw al::backend_exception{al::backend_error::DeviceError, "waveInOpen failed: {}", res};
 
     // Ensure each buffer is 50ms each
-    DWORD BufferSize{mFormat.nAvgBytesPerSec / 20u};
+    auto BufferSize = DWORD{mFormat.nAvgBytesPerSec / 20u};
     BufferSize -= (BufferSize % mFormat.nBlockAlign);
 
     // Allocate circular memory buffer for the captured audio
@@ -506,11 +503,11 @@ void WinMMCapture::open(std::string_view name)
     const auto CapturedDataSize = std::max<size_t>(mDevice->mBufferSize,
         BufferSize*mWaveBuffer.size());
 
-    mRing = RingBuffer::Create(CapturedDataSize, mFormat.nBlockAlign, false);
+    mRing = RingBuffer<std::byte>::Create(CapturedDataSize, mFormat.nBlockAlign, false);
 
     decltype(mBuffer)(BufferSize*mWaveBuffer.size()).swap(mBuffer);
+    std::ranges::fill(mBuffer, clearval);
     auto bufferiter = mBuffer.begin();
-    std::fill(bufferiter, mBuffer.end(), clearval);
 
     mWaveBuffer[0] = WAVEHDR{};
     mWaveBuffer[0].lpData = std::to_address(bufferiter);
@@ -530,7 +527,7 @@ void WinMMCapture::open(std::string_view name)
 void WinMMCapture::start()
 {
     try {
-        for(WAVEHDR &buffer : mWaveBuffer)
+        for(auto &buffer : mWaveBuffer)
         {
             waveInPrepareHeader(mInHdl, &buffer, sizeof(WAVEHDR));
             waveInAddBuffer(mInHdl, &buffer, sizeof(WAVEHDR));
@@ -555,17 +552,17 @@ void WinMMCapture::stop()
 
     waveInStop(mInHdl);
     waveInReset(mInHdl);
-    for(WAVEHDR &buffer : mWaveBuffer)
+    for(auto &buffer : mWaveBuffer)
         waveInUnprepareHeader(mInHdl, &buffer, sizeof(WAVEHDR));
 
     mReadable.store(0, std::memory_order_release);
     mIdx = 0;
 }
 
-void WinMMCapture::captureSamples(std::byte *buffer, uint samples)
-{ std::ignore = mRing->read(buffer, samples); }
+void WinMMCapture::captureSamples(std::span<std::byte> outbuffer)
+{ std::ignore = mRing->read(outbuffer); }
 
-uint WinMMCapture::availableSamples()
+auto WinMMCapture::availableSamples() -> uint
 { return static_cast<uint>(mRing->readSpace()); }
 
 } // namespace
