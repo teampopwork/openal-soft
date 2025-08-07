@@ -29,6 +29,7 @@
 #include <memory.h>
 #include <memory>
 #include <mutex>
+#include <ranges>
 #include <span>
 #include <thread>
 #include <vector>
@@ -41,6 +42,8 @@
 #include "core/logging.h"
 #include "dynload.h"
 #include "fmt/format.h"
+#include "gsl/gsl"
+#include "opthelpers.h"
 #include "ringbuffer.h"
 
 #include <jack/jack.h>
@@ -51,8 +54,6 @@ namespace {
 
 using namespace std::string_literals;
 using namespace std::string_view_literals;
-
-using voidp = void*;
 
 #if HAVE_DYNLOAD
 #define JACK_FUNCS(MAGIC)          \
@@ -165,15 +166,15 @@ auto jack_load() -> bool
 
 
 /* NOLINTNEXTLINE(*-avoid-c-arrays) */
-using JackPortsPtr = std::unique_ptr<const char*[], decltype([](void *ptr) { jack_free(ptr); })>;
+using JackPortsPtr = std::unique_ptr<gsl::czstring[], decltype([](gsl::czstring *ptr)
+    { jack_free(static_cast<void*>(ptr)); })>;
 
 struct DeviceEntry {
     std::string mName;
     std::string mPattern;
 
-    ~DeviceEntry();
+    NOINLINE ~DeviceEntry() = default;
 };
-DeviceEntry::~DeviceEntry() = default;
 
 std::vector<DeviceEntry> PlaybackList;
 
@@ -256,19 +257,14 @@ void EnumerateDevices(jack_client_t *client, std::vector<DeviceEntry> &list)
          */
         for(auto curitem = list.begin()+1;curitem != list.end();++curitem)
         {
-            auto check_match = [curitem](const DeviceEntry &entry) -> bool
-            { return entry.mName == curitem->mName; };
-            if(std::find_if(list.begin(), curitem, check_match) != curitem)
+            const auto subrange = std::span{list.begin(), curitem};
+            if(std::ranges::find(subrange, curitem->mName, &DeviceEntry::mName) != subrange.end())
             {
-                std::string name{curitem->mName};
-                size_t count{1};
-                auto check_name = [&name](const DeviceEntry &entry) -> bool
-                { return entry.mName == name; };
+                auto name = std::string{};
+                auto count = 1_uz;
                 do {
-                    name = curitem->mName;
-                    name += " #";
-                    name += std::to_string(++count);
-                } while(std::find_if(list.begin(), curitem, check_name) != curitem);
+                    name = fmt::format("{} #{}", curitem->mName, ++count);
+                } while(std::ranges::find(subrange, name, &DeviceEntry::mName) != subrange.end());
                 curitem->mName = std::move(name);
             }
         }
@@ -277,7 +273,7 @@ void EnumerateDevices(jack_client_t *client, std::vector<DeviceEntry> &list)
 
 
 struct JackPlayback final : public BackendBase {
-    explicit JackPlayback(DeviceBase *device) noexcept : BackendBase{device} { }
+    explicit JackPlayback(gsl::not_null<DeviceBase*> device) noexcept : BackendBase{device} { }
     ~JackPlayback() override;
 
     int processRt(jack_nframes_t numframes) noexcept;
@@ -333,11 +329,11 @@ int JackPlayback::processRt(jack_nframes_t numframes) noexcept
 
     const auto dst = std::span{outptrs}.first(mPort.size());
     if(mPlaying.load(std::memory_order_acquire)) [[likely]]
-        mDevice->renderSamples(dst, static_cast<uint>(numframes));
+        mDevice->renderSamples(dst, gsl::narrow_cast<uint>(numframes));
     else
     {
         std::ranges::for_each(dst, [numframes](void *outbuf) -> void
-        { std::fill_n(static_cast<float*>(outbuf), numframes, 0.0f); });
+        { std::ranges::fill(std::views::counted(static_cast<float*>(outbuf), numframes), 0.0f); });
     }
 
     return 0;
@@ -663,15 +659,15 @@ bool JackBackendFactory::init()
         return false;
 
     if(!GetConfigValueBool({}, "jack", "spawn-server", false))
-        ClientOptions = static_cast<jack_options_t>(ClientOptions | JackNoStartServer);
+        ClientOptions = gsl::narrow_cast<jack_options_t>(ClientOptions | JackNoStartServer);
 
-    const PathNamePair &binname = GetProcBinary();
-    const char *client_name{binname.fname.empty() ? "alsoft" : binname.fname.c_str()};
+    auto&& binname = GetProcBinary();
+    auto *client_name = binname.fname.empty() ? "alsoft" : binname.fname.c_str();
 
     void (*old_error_cb)(const char*){&jack_error_callback ? jack_error_callback : nullptr};
     jack_set_error_function(jack_msg_handler);
-    jack_status_t status{};
-    jack_client_t *client{jack_client_open(client_name, ClientOptions, &status, nullptr)};
+    auto status = jack_status_t{};
+    auto *client = jack_client_open(client_name, ClientOptions, &status, nullptr);
     jack_set_error_function(old_error_cb);
     if(!client)
     {
@@ -693,7 +689,7 @@ auto JackBackendFactory::enumerate(BackendType type) -> std::vector<std::string>
     auto outnames = std::vector<std::string>{};
 
     auto&& binname = GetProcBinary();
-    auto *client_name{binname.fname.empty() ? "alsoft" : binname.fname.c_str()};
+    auto *client_name = binname.fname.empty() ? "alsoft" : binname.fname.c_str();
     auto status = jack_status_t{};
     switch(type)
     {
@@ -717,7 +713,8 @@ auto JackBackendFactory::enumerate(BackendType type) -> std::vector<std::string>
     return outnames;
 }
 
-BackendPtr JackBackendFactory::createBackend(DeviceBase *device, BackendType type)
+auto JackBackendFactory::createBackend(gsl::not_null<DeviceBase*> device, BackendType type)
+    -> BackendPtr
 {
     if(type == BackendType::Playback)
         return BackendPtr{new JackPlayback{device}};

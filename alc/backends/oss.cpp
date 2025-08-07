@@ -49,6 +49,7 @@
 #include "core/helpers.h"
 #include "core/logging.h"
 #include "fmt/core.h"
+#include "gsl/gsl"
 #include "ringbuffer.h"
 
 #include <sys/soundcard.h>
@@ -86,8 +87,8 @@ using namespace std::string_view_literals;
 
 [[nodiscard]] constexpr auto GetDefaultName() noexcept { return "OSS Default"sv; }
 
-std::string DefaultPlayback{"/dev/dsp"s};
-std::string DefaultCapture{"/dev/dsp"s};
+auto DefaultPlayback = "/dev/dsp"s; /* NOLINT(cert-err58-cpp) */
+auto DefaultCapture = "/dev/dsp"s; /* NOLINT(cert-err58-cpp) */
 
 struct DevMap {
     std::string name;
@@ -154,19 +155,12 @@ void ALCossListAppend(std::vector<DevMap> &list, std::string_view handle, std::s
     if(handle.empty())
         handle = path;
 
-    auto match_devname = [path](const DevMap &entry) -> bool
-    { return entry.device_name == path; };
-    if(std::find_if(list.cbegin(), list.cend(), match_devname) != list.cend())
+    if(std::ranges::find(list, path, &DevMap::device_name) != list.end())
         return;
 
-    auto checkName = [&list](const std::string_view name) -> bool
-    {
-        auto match_name = [name](const DevMap &entry) -> bool { return entry.name == name; };
-        return std::find_if(list.cbegin(), list.cend(), match_name) != list.cend();
-    };
     auto count = 1;
     auto newname = std::string{handle};
-    while(checkName(newname))
+    while(std::ranges::find(list, newname, &DevMap::name) != list.end())
         newname = fmt::format("{} #{}", handle, ++count);
 
     const auto &entry = list.emplace_back(std::move(newname), path);
@@ -242,7 +236,7 @@ constexpr auto log2i(uint x) -> uint
 
 
 struct OSSPlayback final : public BackendBase {
-    explicit OSSPlayback(DeviceBase *device) noexcept : BackendBase{device} { }
+    explicit OSSPlayback(gsl::not_null<DeviceBase*> device) noexcept : BackendBase{device} { }
     ~OSSPlayback() override;
 
     void mixerProc();
@@ -299,8 +293,8 @@ void OSSPlayback::mixerProc()
         }
 
         auto write_buf = std::span{mMixData};
-        mDevice->renderSamples(write_buf.data(), static_cast<uint>(write_buf.size()/frame_size),
-            frame_step);
+        mDevice->renderSamples(write_buf.data(),
+            gsl::narrow_cast<uint>(write_buf.size()/frame_size), frame_step);
         while(!write_buf.empty() && !mKillNow.load(std::memory_order_acquire))
         {
             const auto wrote = write(mFd, write_buf.data(), write_buf.size());
@@ -314,7 +308,7 @@ void OSSPlayback::mixerProc()
                 break;
             }
 
-            write_buf = write_buf.subspan(static_cast<size_t>(wrote));
+            write_buf = write_buf.subspan(gsl::narrow_cast<size_t>(wrote));
         }
     }
 }
@@ -413,8 +407,8 @@ auto OSSPlayback::reset() -> bool
     }
 
     mDevice->mSampleRate = ossSpeed;
-    mDevice->mUpdateSize = static_cast<uint>(info.fragsize) / frameSize;
-    mDevice->mBufferSize = static_cast<uint>(info.fragments) * mDevice->mUpdateSize;
+    mDevice->mUpdateSize = gsl::narrow_cast<uint>(info.fragsize) / frameSize;
+    mDevice->mBufferSize = gsl::narrow_cast<uint>(info.fragments) * mDevice->mUpdateSize;
 
     setDefaultChannelOrder();
 
@@ -447,7 +441,7 @@ void OSSPlayback::stop()
 
 
 struct OSScapture final : public BackendBase {
-    explicit OSScapture(DeviceBase *device) noexcept : BackendBase{device} { }
+    explicit OSScapture(gsl::not_null<DeviceBase*> device) noexcept : BackendBase{device} { }
     ~OSScapture() override;
 
     void recordProc();
@@ -512,7 +506,7 @@ void OSScapture::recordProc()
                 mDevice->handleDisconnect("Failed reading capture samples: {}", errstr);
                 break;
             }
-            mRing->writeAdvance(static_cast<size_t>(amt)/frame_size);
+            mRing->writeAdvance(gsl::narrow_cast<size_t>(amt)/frame_size);
         }
     }
 }
@@ -625,7 +619,7 @@ void OSScapture::captureSamples(std::span<std::byte> outbuffer)
 { std::ignore = mRing->read(outbuffer); }
 
 auto OSScapture::availableSamples() -> uint
-{ return static_cast<uint>(mRing->readSpace()); }
+{ return gsl::narrow_cast<uint>(mRing->readSpace()); }
 
 } // namespace
 
@@ -664,21 +658,22 @@ auto OSSBackendFactory::enumerate(BackendType type) -> std::vector<std::string>
         PlaybackDevices.clear();
         ALCossListPopulate(PlaybackDevices, DSP_CAP_OUTPUT);
         outnames.reserve(PlaybackDevices.size());
-        std::for_each(PlaybackDevices.cbegin(), PlaybackDevices.cend(), add_device);
+        std::ranges::for_each(PlaybackDevices, add_device);
         break;
 
     case BackendType::Capture:
         CaptureDevices.clear();
         ALCossListPopulate(CaptureDevices, DSP_CAP_INPUT);
         outnames.reserve(CaptureDevices.size());
-        std::for_each(CaptureDevices.cbegin(), CaptureDevices.cend(), add_device);
+        std::ranges::for_each(CaptureDevices, add_device);
         break;
     }
 
     return outnames;
 }
 
-BackendPtr OSSBackendFactory::createBackend(DeviceBase *device, BackendType type)
+auto OSSBackendFactory::createBackend(gsl::not_null<DeviceBase*> device, BackendType type)
+    -> BackendPtr
 {
     if(type == BackendType::Playback)
         return BackendPtr{new OSSPlayback{device}};

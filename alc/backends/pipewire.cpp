@@ -56,6 +56,7 @@
 #include "dynload.h"
 #include "fmt/core.h"
 #include "fmt/ranges.h"
+#include "gsl/gsl"
 #include "opthelpers.h"
 #include "pragmadefs.h"
 #include "ringbuffer.h"
@@ -609,7 +610,7 @@ struct EventManager {
     {
         auto plock = MainloopUniqueLock{mLoop};
         auto has_audio = false;
-        plock.wait([this,&has_audio]()
+        plock.wait([this,&has_audio]
         {
             has_audio = mHasAudio.load(std::memory_order_acquire);
             return has_audio || initIsDone(std::memory_order_acquire);
@@ -644,7 +645,7 @@ auto gEventHandler = EventManager{};
 enum class NodeType : unsigned char {
     Sink, Source, Duplex
 };
-constexpr auto InvalidChannelConfig = DevFmtChannels(255);
+constexpr auto InvalidChannelConfig = gsl::narrow<DevFmtChannels>(255);
 struct DeviceNode {
     uint32_t mId{};
 
@@ -687,10 +688,11 @@ auto DefaultSourceDevice = std::string{};
 auto DeviceNode::Add(uint32_t id) -> DeviceNode&
 {
     /* If the node is already in the list, return the existing entry. */
-    const auto match = std::ranges::find(sList, id, &DeviceNode::mId);
-    if(match != sList.end()) return *match;
+    const auto match = std::ranges::lower_bound(sList, id, std::less{}, &DeviceNode::mId);
+    if(match != sList.end() && match->mId == id)
+        return *match;
 
-    auto &n = sList.emplace_back();
+    auto &n = *sList.emplace(match);
     n.mId = id;
     return n;
 }
@@ -807,7 +809,7 @@ void DeviceNode::parseSampleRate(const spa_pod *value, bool force_update) noexce
         /* [0] is the default, [1] is the min, and [2] is the max. */
         TRACE("  sample rate: {} ({} -> {})", srates[0], srates[1], srates[2]);
         if(!mSampleRate || force_update)
-            mSampleRate = static_cast<uint>(std::clamp<int>(srates[0], MinOutputRate,
+            mSampleRate = gsl::narrow_cast<uint>(std::clamp<int>(srates[0], MinOutputRate,
                 MaxOutputRate));
         return;
     }
@@ -831,7 +833,7 @@ void DeviceNode::parseSampleRate(const spa_pod *value, bool force_update) noexce
             if(rate >= int{MinOutputRate} && rate <= int{MaxOutputRate})
             {
                 if(!mSampleRate || force_update)
-                    mSampleRate = static_cast<uint>(rate);
+                    mSampleRate = gsl::narrow_cast<uint>(rate);
                 break;
             }
         }
@@ -849,7 +851,7 @@ void DeviceNode::parseSampleRate(const spa_pod *value, bool force_update) noexce
 
         TRACE("  sample rate: {}", srates[0]);
         if(!mSampleRate || force_update)
-            mSampleRate = static_cast<uint>(std::clamp<int>(srates[0], MinOutputRate,
+            mSampleRate = gsl::narrow_cast<uint>(std::clamp<int>(srates[0], MinOutputRate,
                 MaxOutputRate));
         return;
     }
@@ -1108,7 +1110,7 @@ auto MetadataProxy::propertyCallback(void*, uint32_t id, const char *key, const 
         const auto len = spa_json_next(iter, &val);
         if(len <= 0) return str;
 
-        str.emplace(static_cast<uint>(len), '\0');
+        str.emplace(gsl::narrow_cast<uint>(len), '\0');
         if(spa_json_parse_string(val, len, str->data()) <= 0)
             str.reset();
         else while(!str->empty() && str->back() == '\0')
@@ -1384,7 +1386,7 @@ auto make_spa_info(DeviceBase *device, bool is51rear, use_f32p_e use_f32p) -> sp
     }
     if(!map.empty())
     {
-        info.channels = static_cast<uint32_t>(map.size());
+        info.channels = gsl::narrow_cast<uint32_t>(map.size());
         std::ranges::copy(map, std::begin(info.position));
     }
 
@@ -1413,7 +1415,7 @@ class PipeWirePlayback final : public BackendBase {
     std::vector<void*> mChannelPtrs;
 
 public:
-    explicit PipeWirePlayback(DeviceBase *device) noexcept : BackendBase{device} { }
+    explicit PipeWirePlayback(gsl::not_null<DeviceBase*> device) noexcept : BackendBase{device} { }
     ~PipeWirePlayback() final
     {
         /* Stop the mainloop so the stream can be properly destroyed. */
@@ -1449,12 +1451,12 @@ void PipeWirePlayback::outputCallback() noexcept
     /* In 0.3.49, pw_buffer::requested specifies the number of samples needed
      * by the resampler/graph for this audio update.
      */
-    auto length = static_cast<uint>(pw_buf->requested);
+    auto length = gsl::narrow_cast<uint>(pw_buf->requested);
 #else
     /* In 0.3.48 and earlier, spa_io_rate_match::size apparently has the number
      * of samples per update.
      */
-    uint length{mRateMatch ? mRateMatch->size : 0u};
+    auto length = uint{mRateMatch ? mRateMatch->size : 0u};
 #endif
     /* If no length is specified, use the device's update size as a fallback. */
     if(!length) [[unlikely]] length = mDevice->mUpdateSize;
@@ -1500,11 +1502,12 @@ void PipeWirePlayback::open(std::string_view name)
             match = std::ranges::find(devlist, DefaultSinkDevice, &DeviceNode::mDevName);
         if(match == devlist.end())
         {
-            match = std::ranges::find(devlist, NodeType::Source, &DeviceNode::mType);
-            if(match == devlist.end())
-                throw al::backend_exception{al::backend_error::NoDevice,
-                    "No PipeWire playback device found"};
+            match = std::ranges::find_if(devlist, [](const DeviceNode &n) noexcept -> bool
+            { return n.mType != NodeType::Source; });
         }
+        if(match == devlist.end())
+            throw al::backend_exception{al::backend_error::NoDevice,
+                "No PipeWire playback device found"};
 
         targetid = match->mSerial;
         devname = match->mName;
@@ -1590,7 +1593,8 @@ auto PipeWirePlayback::reset() -> bool
             if(!mDevice->Flags.test(FrequencyRequest) && match->mSampleRate > 0)
             {
                 /* Scale the update size if the sample rate changes. */
-                const auto scale = static_cast<double>(match->mSampleRate) / mDevice->mSampleRate;
+                const auto scale = gsl::narrow_cast<double>(match->mSampleRate)
+                    / mDevice->mSampleRate;
 
                 /* Don't scale down power-of-two sizes unless it would be more
                  * than halfway to the next lower power-of-two. PipeWire uses
@@ -1606,8 +1610,9 @@ auto PipeWirePlayback::reset() -> bool
                     const auto updatesize = std::round(mDevice->mUpdateSize * scale);
                     const auto buffersize = std::round(mDevice->mBufferSize * scale);
 
-                    mDevice->mUpdateSize = static_cast<uint>(std::clamp(updatesize, 64.0, 8192.0));
-                    mDevice->mBufferSize = static_cast<uint>(std::max(buffersize, 128.0));
+                    mDevice->mUpdateSize = gsl::narrow_cast<uint>(std::clamp(updatesize, 64.0,
+                        8192.0));
+                    mDevice->mBufferSize = gsl::narrow_cast<uint>(std::max(buffersize, 128.0));
                 }
                 mDevice->mSampleRate = match->mSampleRate;
             }
@@ -1685,7 +1690,7 @@ auto PipeWirePlayback::reset() -> bool
             "Error connecting PipeWire stream (res: {})", res};
 
     /* Wait for the stream to become paused (ready to start streaming). */
-    plock.wait([stream=mStream.get()]()
+    plock.wait([stream=mStream.get()]
     {
         const char *error{};
         const auto state = pw_stream_get_state(stream, &error);
@@ -1720,7 +1725,7 @@ void PipeWirePlayback::start()
     /* Wait for the stream to start playing (would be nice to not, but we need
      * the actual update size which is only available after starting).
      */
-    plock.wait([stream=mStream.get()]()
+    plock.wait([stream=mStream.get()]
     {
         const char *error{};
         const auto state = pw_stream_get_state(stream, &error);
@@ -1756,11 +1761,11 @@ void PipeWirePlayback::start()
             const auto totalbuffers = ptime.avail_buffers + ptime.queued_buffers;
 
             /* Ensure the delay is in sample frames. */
-            const auto delay = static_cast<uint64_t>(ptime.delay) * mDevice->mSampleRate *
+            const auto delay = gsl::narrow_cast<uint64_t>(ptime.delay) * mDevice->mSampleRate *
                 ptime.rate.num / ptime.rate.denom;
 
             mDevice->mUpdateSize = updatesize;
-            mDevice->mBufferSize = static_cast<uint>(ptime.buffered + delay +
+            mDevice->mBufferSize = gsl::narrow_cast<uint>(ptime.buffered + delay +
                 uint64_t{totalbuffers}*updatesize);
             break;
         }
@@ -1771,11 +1776,11 @@ void PipeWirePlayback::start()
         if(ptime.rate.denom > 0 && updatesize > 0)
         {
             /* Ensure the delay is in sample frames. */
-            const auto delay = static_cast<uint64_t>(ptime.delay) * mDevice->mSampleRate *
+            const auto delay = gsl::narrow_cast<uint64_t>(ptime.delay) * mDevice->mSampleRate *
                 ptime.rate.num / ptime.rate.denom;
 
             mDevice->mUpdateSize = updatesize;
-            mDevice->mBufferSize = static_cast<uint>(delay + updatesize);
+            mDevice->mBufferSize = gsl::narrow_cast<uint>(delay + updatesize);
             break;
         }
 #endif
@@ -1798,7 +1803,7 @@ void PipeWirePlayback::stop()
         ERR("Failed to stop PipeWire stream (res: {})", res);
 
     /* Wait for the stream to stop playing. */
-    plock.wait([stream=mStream.get()]()
+    plock.wait([stream=mStream.get()]
     { return pw_stream_get_state(stream, nullptr) != PW_STREAM_STATE_STREAMING; });
 }
 
@@ -1908,7 +1913,7 @@ class PipeWireCapture final : public BackendBase {
     RingBufferPtr<std::byte> mRing;
 
 public:
-    explicit PipeWireCapture(DeviceBase *device) noexcept : BackendBase{device} { }
+    explicit PipeWireCapture(gsl::not_null<DeviceBase*> device) noexcept : BackendBase{device} { }
     ~PipeWireCapture() final { if(mLoop) mLoop.stop(); }
 };
 
@@ -1934,10 +1939,10 @@ void PipeWireCapture::inputCallback() noexcept
 
 void PipeWireCapture::open(std::string_view name)
 {
-    static std::atomic<uint> OpenCount{0};
+    static auto OpenCount = std::atomic<uint>{0u};
 
-    uint64_t targetid{PwIdAny};
-    std::string devname{};
+    auto targetid = uint64_t{PwIdAny};
+    auto devname = std::string{};
     gEventHandler.waitForInit();
     if(name.empty())
     {
@@ -1946,16 +1951,11 @@ void PipeWireCapture::open(std::string_view name)
 
         auto match = devlist.end();
         if(!DefaultSourceDevice.empty())
-        {
-            auto match_default = [](const DeviceNode &n) -> bool
-            { return n.mDevName == DefaultSourceDevice; };
-            match = std::find_if(devlist.begin(), devlist.end(), match_default);
-        }
+            match = std::ranges::find(devlist, DefaultSourceDevice, &DeviceNode::mDevName);
         if(match == devlist.end())
         {
-            auto match_capture = [](const DeviceNode &n) -> bool
-            { return n.mType != NodeType::Sink; };
-            match = std::find_if(devlist.begin(), devlist.end(), match_capture);
+            match = std::ranges::find_if(devlist, [](const DeviceNode &n) noexcept -> bool
+            { return n.mType != NodeType::Sink; });
         }
         if(match == devlist.end())
         {
@@ -1973,25 +1973,22 @@ void PipeWireCapture::open(std::string_view name)
     {
         const auto evtlock = EventWatcherLockGuard{gEventHandler};
         auto&& devlist = DeviceNode::GetList();
-        const std::string_view prefix{GetMonitorPrefix()};
-        const std::string_view suffix{GetMonitorSuffix()};
+        const auto prefix = GetMonitorPrefix();
+        const auto suffix = GetMonitorSuffix();
 
-        auto match_name = [name](const DeviceNode &n) -> bool
-        { return n.mType != NodeType::Sink && n.mName == name; };
-        auto match = std::find_if(devlist.begin(), devlist.end(), match_name);
+        auto match = std::ranges::find_if(devlist, [name](const DeviceNode &n) -> bool
+        { return n.mType != NodeType::Sink && n.mName == name; });
         if(match == devlist.end() && name.starts_with(prefix))
         {
-            const std::string_view sinkname{name.substr(prefix.length())};
-            auto match_sinkname = [sinkname](const DeviceNode &n) -> bool
-            { return n.mType == NodeType::Sink && n.mName == sinkname; };
-            match = std::find_if(devlist.begin(), devlist.end(), match_sinkname);
+            const auto sinkname = name.substr(prefix.length());
+            match = std::ranges::find_if(devlist, [sinkname](const DeviceNode &n) -> bool
+            { return n.mType == NodeType::Sink && n.mName == sinkname; });
         }
         else if(match == devlist.end() && name.ends_with(suffix))
         {
-            const std::string_view sinkname{name.substr(0, name.size()-suffix.size())};
-            auto match_sinkname = [sinkname](const DeviceNode &n) -> bool
-            { return n.mType == NodeType::Sink && n.mDevName == sinkname; };
-            match = std::find_if(devlist.begin(), devlist.end(), match_sinkname);
+            const auto sinkname = name.substr(0, name.size()-suffix.size());
+            match = std::ranges::find_if(devlist, [sinkname](const DeviceNode &n) -> bool
+            { return n.mType == NodeType::Sink && n.mDevName == sinkname; });
         }
         if(match == devlist.end())
             throw al::backend_exception{al::backend_error::NoDevice,
@@ -2047,9 +2044,7 @@ void PipeWireCapture::open(std::string_view name)
         const auto evtlock = EventWatcherLockGuard{gEventHandler};
         auto&& devlist = DeviceNode::GetList();
 
-        auto match_id = [targetid=mTargetId](const DeviceNode &n) -> bool
-        { return targetid == n.mSerial; };
-        auto match = std::find_if(devlist.begin(), devlist.end(), match_id);
+        auto match = std::ranges::find(devlist, mTargetId, &DeviceNode::mSerial);
         if(match != devlist.end())
             is51rear = match->mIs51Rear;
     }
@@ -2115,7 +2110,7 @@ void PipeWireCapture::open(std::string_view name)
             "Error connecting PipeWire stream (res: {})", res};
 
     /* Wait for the stream to become paused (ready to start streaming). */
-    plock.wait([stream=mStream.get()]()
+    plock.wait([stream=mStream.get()]
     {
         const char *error{};
         const auto state = pw_stream_get_state(stream, &error);
@@ -2142,7 +2137,7 @@ void PipeWireCapture::start()
         throw al::backend_exception{al::backend_error::DeviceError,
             "Failed to start PipeWire stream (res: {})", res};
 
-    plock.wait([stream=mStream.get()]()
+    plock.wait([stream=mStream.get()]
     {
         const char *error{};
         const auto state = pw_stream_get_state(stream, &error);
@@ -2159,12 +2154,12 @@ void PipeWireCapture::stop()
     if(const auto res = pw_stream_set_active(mStream.get(), false))
         ERR("Failed to stop PipeWire stream (res: {})", res);
 
-    plock.wait([stream=mStream.get()]()
+    plock.wait([stream=mStream.get()]
     { return pw_stream_get_state(stream, nullptr) != PW_STREAM_STATE_STREAMING; });
 }
 
-uint PipeWireCapture::availableSamples()
-{ return static_cast<uint>(mRing->readSpace()); }
+auto PipeWireCapture::availableSamples() -> uint
+{ return gsl::narrow_cast<uint>(mRing->readSpace()); }
 
 void PipeWireCapture::captureSamples(std::span<std::byte> outbuffer)
 { std::ignore = mRing->read(outbuffer); }
@@ -2214,20 +2209,11 @@ auto PipeWireBackendFactory::enumerate(BackendType type) -> std::vector<std::str
     const auto evtlock = EventWatcherLockGuard{gEventHandler};
     auto&& devlist = DeviceNode::GetList();
 
-    static constexpr auto match_defsink = [](const DeviceNode &n) -> bool
-    { return n.mDevName == DefaultSinkDevice; };
-    static constexpr auto match_defsource = [](const DeviceNode &n) -> bool
-    { return n.mDevName == DefaultSourceDevice; };
-
-    static constexpr auto sort_devnode = [](DeviceNode &lhs, DeviceNode &rhs) noexcept -> bool
-    { return lhs.mId < rhs.mId; };
-    std::ranges::sort(devlist, sort_devnode);
-
     auto defmatch = devlist.begin();
     switch(type)
     {
     case BackendType::Playback:
-        defmatch = std::find_if(defmatch, devlist.end(), match_defsink);
+        defmatch = std::ranges::find(devlist, DefaultSinkDevice, &DeviceNode::mDevName);
         if(defmatch != devlist.end())
             outnames.emplace_back(defmatch->mName);
         for(auto iter = devlist.begin();iter != devlist.end();++iter)
@@ -2238,7 +2224,7 @@ auto PipeWireBackendFactory::enumerate(BackendType type) -> std::vector<std::str
         break;
     case BackendType::Capture:
         outnames.reserve(devlist.size());
-        defmatch = std::find_if(defmatch, devlist.end(), match_defsource);
+        defmatch = std::ranges::find(devlist, DefaultSourceDevice, &DeviceNode::mDevName);
         if(defmatch != devlist.end())
         {
             if(defmatch->mType == NodeType::Sink)
@@ -2263,7 +2249,8 @@ auto PipeWireBackendFactory::enumerate(BackendType type) -> std::vector<std::str
 }
 
 
-BackendPtr PipeWireBackendFactory::createBackend(DeviceBase *device, BackendType type)
+auto PipeWireBackendFactory::createBackend(gsl::not_null<DeviceBase*> device, BackendType type)
+    -> BackendPtr
 {
     if(type == BackendType::Playback)
         return BackendPtr{new PipeWirePlayback{device}};

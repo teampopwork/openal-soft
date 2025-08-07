@@ -38,6 +38,7 @@
 
 #include <memory>
 #include <cstring>
+#include <string_view>
 #include <unistd.h>
 #include <sys/types.h>
 #ifdef __linux__
@@ -46,6 +47,7 @@
 #include <sys/thr.h>
 #endif
 
+#include "gsl/gsl"
 
 namespace dbus {
 
@@ -68,31 +70,30 @@ inline auto _gettid() -> pid_t
 {
 #ifdef __linux__
     /* NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg) */
-    return static_cast<pid_t>(syscall(SYS_gettid));
+    return gsl::narrow_cast<pid_t>(syscall(SYS_gettid));
 #elif defined(__FreeBSD__)
     auto pid = long{};
     thr_self(&pid);
-    return static_cast<pid_t>(pid);
+    return gsl::narrow_cast<pid_t>(pid);
 #else
 #warning gettid not available
     return 0;
 #endif
 }
 
-int translate_error(const char *name)
+auto translate_error(const std::string_view name) -> int
 {
-    if(strcmp(name, DBUS_ERROR_NO_MEMORY) == 0)
+    if(name == DBUS_ERROR_NO_MEMORY)
         return -ENOMEM;
-    if(strcmp(name, DBUS_ERROR_SERVICE_UNKNOWN) == 0
-        || strcmp(name, DBUS_ERROR_NAME_HAS_NO_OWNER) == 0)
+    if(name == DBUS_ERROR_SERVICE_UNKNOWN || name == DBUS_ERROR_NAME_HAS_NO_OWNER)
         return -ENOENT;
-    if(strcmp(name, DBUS_ERROR_ACCESS_DENIED) == 0
-        || strcmp(name, DBUS_ERROR_AUTH_FAILED) == 0)
+    if(name == DBUS_ERROR_ACCESS_DENIED || name == DBUS_ERROR_AUTH_FAILED)
         return -EACCES;
     return -EIO;
 }
 
-int rtkit_get_int_property(DBusConnection *connection, const char *propname, long long *propval)
+auto rtkit_get_int_property(DBusConnection *connection, gsl::czstring propname, long long *propval)
+    -> int
 {
     const auto m = dbus::MessagePtr{dbus_message_new_method_call(RTKIT_SERVICE_NAME,
         RTKIT_OBJECT_PATH, "org.freedesktop.DBus.Properties", "Get")};
@@ -158,14 +159,14 @@ int rtkit_get_max_realtime_priority(DBusConnection *system_bus)
 {
     long long retval{};
     const auto err = rtkit_get_int_property(system_bus, "MaxRealtimePriority", &retval);
-    return err < 0 ? err : static_cast<int>(retval);
+    return err < 0 ? err : gsl::narrow_cast<int>(retval);
 }
 
 int rtkit_get_min_nice_level(DBusConnection *system_bus, int *min_nice_level)
 {
     long long retval{};
     const auto err = rtkit_get_int_property(system_bus, "MinNiceLevel", &retval);
-    if(err >= 0) *min_nice_level = static_cast<int>(retval);
+    if(err >= 0) *min_nice_level = gsl::narrow_cast<int>(retval);
     return err;
 }
 
@@ -187,8 +188,8 @@ int rtkit_make_realtime(DBusConnection *system_bus, pid_t thread, int priority)
         RTKIT_OBJECT_PATH, "org.freedesktop.RealtimeKit1", "MakeThreadRealtime")};
     if(!m) return -ENOMEM;
 
-    auto u64 = static_cast<dbus_uint64_t>(thread);
-    auto u32 = static_cast<dbus_uint32_t>(priority);
+    auto u64 = gsl::narrow_cast<dbus_uint64_t>(thread);
+    auto u32 = gsl::narrow_cast<dbus_uint32_t>(priority);
     const auto ready = dbus_message_append_args(m.get(),
         dbus::TypeUInt64, &u64,
         dbus::TypeUInt32, &u32,
@@ -217,8 +218,8 @@ int rtkit_make_high_priority(DBusConnection *system_bus, pid_t thread, int nice_
         RTKIT_OBJECT_PATH, "org.freedesktop.RealtimeKit1", "MakeThreadHighPriority")};
     if(!m) return -ENOMEM;
 
-    auto u64 = static_cast<dbus_uint64_t>(thread);
-    auto s32 = static_cast<dbus_int32_t>(nice_level);
+    auto u64 = gsl::narrow_cast<dbus_uint64_t>(thread);
+    auto s32 = gsl::narrow_cast<dbus_int32_t>(nice_level);
     const auto ready = dbus_message_append_args(m.get(),
         dbus::TypeUInt64, &u64,
         dbus::TypeInt32, &s32,

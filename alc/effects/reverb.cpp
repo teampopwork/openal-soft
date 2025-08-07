@@ -22,7 +22,6 @@
 
 #include <algorithm>
 #include <array>
-#include <cassert>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -45,6 +44,7 @@
 #include "core/filters/splitter.h"
 #include "core/mixer.h"
 #include "core/mixer/defs.h"
+#include "gsl/gsl"
 #include "intrusive_ptr.h"
 #include "opthelpers.h"
 #include "vector.h"
@@ -286,7 +286,7 @@ struct DelayLineU {
 
     void realizeLineOffset(std::span<float> sampleBuffer) noexcept
     {
-        assert(sampleBuffer.size() > 4 && !(sampleBuffer.size() & (sampleBuffer.size()-1)));
+        Expects(sampleBuffer.size() > 4 && !(sampleBuffer.size() & (sampleBuffer.size()-1)));
         mLine = sampleBuffer;
     }
 
@@ -300,7 +300,7 @@ struct DelayLineU {
     }
 
     [[nodiscard]]
-    auto get(size_t chan) const noexcept
+    auto get(const size_t chan) const noexcept
     {
         const auto stride = mLine.size() / NUM_LINES;
         return mLine.subspan(chan*stride, stride);
@@ -314,7 +314,7 @@ struct DelayLineU {
         offset &= stride-1;
         while(const auto rem = std::distance(input, in.end()))
         {
-            const auto td = std::min(ptrdiff_t(stride-offset), rem);
+            const auto td = std::min(gsl::narrow_cast<ptrdiff_t>(stride-offset), rem);
             input = std::ranges::copy(std::views::counted(input, td),
                 (output | std::views::drop(offset)).begin()).in;
             /* Either wrapping back to 0 with more input, or it's done. */
@@ -772,7 +772,7 @@ void ReverbState::allocLines(const float frequency)
         linelengths[oidx++] = count;
         totalSamples += count;
     }
-    assert(oidx == linelengths.size());
+    Ensures(oidx == linelengths.size());
 
     if(totalSamples != mSampleBuffer.size())
         decltype(mSampleBuffer)(totalSamples).swap(mSampleBuffer);
@@ -796,7 +796,7 @@ void ReverbState::allocLines(const float frequency)
         pipeline.mLate.Delay.realizeLineOffset(bufferspan.first(linelengths[oidx]));
         bufferspan = bufferspan.subspan(linelengths[oidx++]);
     }
-    assert(oidx == linelengths.size());
+    Ensures(oidx == linelengths.size());
 }
 
 void ReverbState::deviceUpdate(const DeviceBase *device, const BufferStorage*)
@@ -1208,7 +1208,7 @@ void ReverbState::update(const ContextBase *Context, const EffectSlot *Slot,
     const EffectProps *props_, const EffectTarget target)
 {
     auto &props = std::get<ReverbProps>(*props_);
-    const auto *Device = Context->mDevice;
+    const auto Device = al::get_not_null(Context->mDevice);
     const auto frequency = static_cast<float>(Device->mSampleRate);
 
     /* If the HF limit parameter is flagged, calculate an appropriate limit
@@ -1874,8 +1874,8 @@ struct ReverbStateFactory final : public EffectStateFactory {
 
 } // namespace
 
-EffectStateFactory *ReverbStateFactory_getFactory()
+auto ReverbStateFactory_getFactory() -> gsl::not_null<EffectStateFactory*>
 {
     static ReverbStateFactory ReverbFactory{};
-    return &ReverbFactory;
+    return gsl::make_not_null(&ReverbFactory);
 }

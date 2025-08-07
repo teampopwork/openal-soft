@@ -33,7 +33,6 @@
 
 #include <algorithm>
 #include <atomic>
-#include <cassert>
 #include <cstdio>
 #include <cstdlib>
 #include <memory.h>
@@ -50,8 +49,9 @@
 #include "core/logging.h"
 #include "dynload.h"
 #include "fmt/core.h"
+#include "gsl/gsl"
 #include "ringbuffer.h"
-#include "strutils.h"
+#include "strutils.hpp"
 
 /* MinGW-w64 needs this for some unknown reason now. */
 using LPCWAVEFORMATEX = const WAVEFORMATEX*;
@@ -153,7 +153,7 @@ auto CALLBACK DSoundEnumDevices(GUID *guid, const WCHAR *desc, const WCHAR*, voi
 
 
 struct DSoundPlayback final : public BackendBase {
-    explicit DSoundPlayback(DeviceBase *device) noexcept : BackendBase{device} { }
+    explicit DSoundPlayback(gsl::not_null<DeviceBase*> device) noexcept : BackendBase{device} { }
     ~DSoundPlayback() override;
 
     int mixerProc();
@@ -411,10 +411,10 @@ bool DSoundPlayback::reset()
     do {
         hr = S_OK;
         OutputType.Format.wFormatTag = WAVE_FORMAT_PCM;
-        OutputType.Format.nChannels = static_cast<WORD>(mDevice->channelsFromFmt());
-        OutputType.Format.wBitsPerSample = static_cast<WORD>(mDevice->bytesFromFmt() * 8);
-        OutputType.Format.nBlockAlign = static_cast<WORD>(OutputType.Format.nChannels *
-            OutputType.Format.wBitsPerSample / 8);
+        OutputType.Format.nChannels = gsl::narrow_cast<WORD>(mDevice->channelsFromFmt());
+        OutputType.Format.wBitsPerSample = gsl::narrow_cast<WORD>(mDevice->bytesFromFmt() * 8);
+        OutputType.Format.nBlockAlign = gsl::narrow_cast<WORD>(OutputType.Format.nChannels
+            * OutputType.Format.wBitsPerSample / 8);
         OutputType.Format.nSamplesPerSec = mDevice->mSampleRate;
         OutputType.Format.nAvgBytesPerSec = OutputType.Format.nSamplesPerSec *
             OutputType.Format.nBlockAlign;
@@ -473,7 +473,7 @@ bool DSoundPlayback::reset()
         if(SUCCEEDED(hr))
         {
             auto num_updates = mDevice->mBufferSize / mDevice->mUpdateSize;
-            assert(num_updates <= MAX_UPDATES);
+            Expects(num_updates <= MAX_UPDATES);
 
             auto nots = std::array<DSBPOSITIONNOTIFY,MAX_UPDATES>{};
             for(auto i = 0u;i < num_updates;++i)
@@ -523,7 +523,7 @@ void DSoundPlayback::stop()
 
 
 struct DSoundCapture final : public BackendBase {
-    explicit DSoundCapture(DeviceBase *device) noexcept : BackendBase{device} { }
+    explicit DSoundCapture(gsl::not_null<DeviceBase*> device) noexcept : BackendBase{device} { }
     ~DSoundCapture() override;
 
     void open(std::string_view name) override;
@@ -620,10 +620,10 @@ void DSoundCapture::open(std::string_view name)
     }
 
     InputType.Format.wFormatTag = WAVE_FORMAT_PCM;
-    InputType.Format.nChannels = static_cast<WORD>(mDevice->channelsFromFmt());
-    InputType.Format.wBitsPerSample = static_cast<WORD>(mDevice->bytesFromFmt() * 8);
-    InputType.Format.nBlockAlign = static_cast<WORD>(InputType.Format.nChannels *
-        InputType.Format.wBitsPerSample / 8);
+    InputType.Format.nChannels = gsl::narrow_cast<WORD>(mDevice->channelsFromFmt());
+    InputType.Format.wBitsPerSample = gsl::narrow_cast<WORD>(mDevice->bytesFromFmt() * 8);
+    InputType.Format.nBlockAlign = gsl::narrow_cast<WORD>(InputType.Format.nChannels
+        * InputType.Format.wBitsPerSample / 8);
     InputType.Format.nSamplesPerSec = mDevice->mSampleRate;
     InputType.Format.nAvgBytesPerSec = InputType.Format.nSamplesPerSec *
         InputType.Format.nBlockAlign;
@@ -708,7 +708,7 @@ uint DSoundCapture::availableSamples()
         if(SUCCEEDED(hr))
         {
             const auto NumBytes = (BufferBytes+ReadCursor-LastCursor) % BufferBytes;
-            if(!NumBytes) return static_cast<uint>(mRing->readSpace());
+            if(!NumBytes) return gsl::narrow_cast<uint>(mRing->readSpace());
             hr = mDSCbuffer->Lock(LastCursor, NumBytes, &ReadPtr1, &ReadCnt1, &ReadPtr2, &ReadCnt2,
                 0);
         }
@@ -728,7 +728,7 @@ uint DSoundCapture::availableSamples()
         }
     }
 
-    return static_cast<uint>(mRing->readSpace());
+    return gsl::narrow_cast<uint>(mRing->readSpace());
 }
 
 } // namespace
@@ -818,7 +818,8 @@ auto DSoundBackendFactory::enumerate(BackendType type) -> std::vector<std::strin
     return outnames;
 }
 
-BackendPtr DSoundBackendFactory::createBackend(DeviceBase *device, BackendType type)
+auto DSoundBackendFactory::createBackend(gsl::not_null<DeviceBase*> device, BackendType type)
+    -> BackendPtr
 {
     if(type == BackendType::Playback)
         return BackendPtr{new DSoundPlayback{device}};

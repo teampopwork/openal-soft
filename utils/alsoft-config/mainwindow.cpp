@@ -25,14 +25,16 @@
 #endif
 
 #include "almalloc.h"
+#include "gsl/gsl"
 
 namespace {
 
+/* NOLINTBEGIN(cert-err58-cpp) */
 struct BackendNamePair {
     QString backend_name;
     QString full_string;
 };
-const std::array backendList{
+const auto backendList = std::array{
 #if HAVE_PIPEWIRE
     BackendNamePair{ QStringLiteral("pipewire"), QStringLiteral("PipeWire") },
 #endif
@@ -83,7 +85,7 @@ struct NameValuePair {
     QString name;
     QString value;
 };
-const std::array speakerModeList{
+const auto speakerModeList = std::array{
     NameValuePair{ QStringLiteral("Autodetect"), QStringLiteral("") },
     NameValuePair{ QStringLiteral("Mono"), QStringLiteral("mono") },
     NameValuePair{ QStringLiteral("Stereo"), QStringLiteral("stereo") },
@@ -98,7 +100,7 @@ const std::array speakerModeList{
     NameValuePair{ QStringLiteral("Ambisonic, 3rd Order"), QStringLiteral("ambi3") },
     NameValuePair{ QStringLiteral("Ambisonic, 4th Order"), QStringLiteral("ambi4") },
 };
-const std::array sampleTypeList{
+const auto sampleTypeList = std::array{
     NameValuePair{ QStringLiteral("Autodetect"), QStringLiteral("") },
     NameValuePair{ QStringLiteral("8-bit int"), QStringLiteral("int8") },
     NameValuePair{ QStringLiteral("8-bit uint"), QStringLiteral("uint8") },
@@ -108,7 +110,7 @@ const std::array sampleTypeList{
     NameValuePair{ QStringLiteral("32-bit uint"), QStringLiteral("uint32") },
     NameValuePair{ QStringLiteral("32-bit float"), QStringLiteral("float32") },
 };
-const std::array resamplerList{
+const auto resamplerList = std::array{
     NameValuePair{ QStringLiteral("Point"), QStringLiteral("point") },
     NameValuePair{ QStringLiteral("Linear"), QStringLiteral("linear") },
     NameValuePair{ QStringLiteral("Cubic Spline"), QStringLiteral("spline") },
@@ -121,64 +123,62 @@ const std::array resamplerList{
     NameValuePair{ QStringLiteral("47th order Sinc (fast)"), QStringLiteral("fast_bsinc48") },
     NameValuePair{ QStringLiteral("47th order Sinc"), QStringLiteral("bsinc48") },
 };
-const std::array stereoModeList{
+const auto stereoModeList = std::array{
     NameValuePair{ QStringLiteral("Autodetect"), QStringLiteral("") },
     NameValuePair{ QStringLiteral("Speakers"), QStringLiteral("speakers") },
     NameValuePair{ QStringLiteral("Headphones"), QStringLiteral("headphones") },
 };
-const std::array stereoEncList{
+const auto stereoEncList = std::array{
     NameValuePair{ QStringLiteral("Default"), QStringLiteral("") },
     NameValuePair{ QStringLiteral("Basic"), QStringLiteral("panpot") },
     NameValuePair{ QStringLiteral("UHJ"), QStringLiteral("uhj") },
     NameValuePair{ QStringLiteral("Binaural"), QStringLiteral("hrtf") },
 };
-const std::array ambiFormatList{
+const auto ambiFormatList = std::array{
     NameValuePair{ QStringLiteral("Default"), QStringLiteral("") },
     NameValuePair{ QStringLiteral("AmbiX (ACN, SN3D)"), QStringLiteral("ambix") },
     NameValuePair{ QStringLiteral("Furse-Malham"), QStringLiteral("fuma") },
     NameValuePair{ QStringLiteral("ACN, N3D"), QStringLiteral("acn+n3d") },
     NameValuePair{ QStringLiteral("ACN, FuMa"), QStringLiteral("acn+fuma") },
 };
-const std::array hrtfModeList{
+const auto hrtfModeList = std::array{
     NameValuePair{ QStringLiteral("1st Order Ambisonic"), QStringLiteral("ambi1") },
     NameValuePair{ QStringLiteral("2nd Order Ambisonic"), QStringLiteral("ambi2") },
     NameValuePair{ QStringLiteral("3rd Order Ambisonic"), QStringLiteral("ambi3") },
+    NameValuePair{ QStringLiteral("4th Order Ambisonic"), QStringLiteral("ambi4") },
     NameValuePair{ QStringLiteral("Default (Full)"), QStringLiteral("") },
     NameValuePair{ QStringLiteral("Full"), QStringLiteral("full") },
 };
+/* NOLINTEND(cert-err58-cpp) */
 
 auto GetDefaultIndex(const std::span<const NameValuePair> list) -> uint8_t
 {
     auto iter = std::ranges::find(list, QStringLiteral(""), &NameValuePair::value);
     if(iter != list.end())
-        return static_cast<uint8_t>(std::distance(list.begin(), iter));
+        return gsl::narrow<uint8_t>(std::distance(list.begin(), iter));
     throw std::runtime_error{"Failed to find default entry"};
 }
 
 #ifdef Q_OS_WIN32
-struct CoTaskMemDeleter {
-    void operator()(void *buffer) { CoTaskMemFree(buffer); }
-};
-/* NOLINTNEXTLINE(*-avoid-c-arrays) */
-using WCharBufferPtr = std::unique_ptr<WCHAR[],CoTaskMemDeleter>;
+using WCharBufferPtr = std::unique_ptr<WCHAR, decltype([](WCHAR *buffer)
+    { CoTaskMemFree(buffer); })>;
 #endif
 
 QString getDefaultConfigName()
 {
 #ifdef Q_OS_WIN32
-    const char *fname{"alsoft.ini"};
-    static constexpr auto get_appdata_path = []() -> QString
+    auto *fname = "alsoft.ini";
+    auto base = std::invoke([]() -> QString
     {
         auto buffer = WCharBufferPtr{};
-        if(const HRESULT hr{SHGetKnownFolderPath(FOLDERID_RoamingAppData, KF_FLAG_DONT_UNEXPAND,
-            nullptr, al::out_ptr(buffer))}; SUCCEEDED(hr))
+        if(const auto hr = SHGetKnownFolderPath(FOLDERID_RoamingAppData, KF_FLAG_DONT_UNEXPAND,
+            nullptr, al::out_ptr(buffer)); SUCCEEDED(hr))
             return QString::fromWCharArray(buffer.get());
         return QString{};
-    };
-    QString base = get_appdata_path();
+    });
 #else
-    const char *fname{"alsoft.conf"};
-    QString base = qgetenv("XDG_CONFIG_HOME");
+    auto *fname = "alsoft.conf";
+    auto base = QString{qgetenv("XDG_CONFIG_HOME")};
     if(base.isEmpty())
     {
         base = qgetenv("HOME");
@@ -194,17 +194,16 @@ QString getDefaultConfigName()
 QString getBaseDataPath()
 {
 #ifdef Q_OS_WIN32
-    static constexpr auto get_appdata_path = []() -> QString
+    auto base = std::invoke([]() -> QString
     {
         auto buffer = WCharBufferPtr{};
-        if(const HRESULT hr{SHGetKnownFolderPath(FOLDERID_RoamingAppData, KF_FLAG_DONT_UNEXPAND,
-            nullptr, al::out_ptr(buffer))}; SUCCEEDED(hr))
+        if(const auto hr = SHGetKnownFolderPath(FOLDERID_RoamingAppData, KF_FLAG_DONT_UNEXPAND,
+            nullptr, al::out_ptr(buffer)); SUCCEEDED(hr))
             return QString::fromWCharArray(buffer.get());
         return QString{};
-    };
-    QString base = get_appdata_path();
+    });
 #else
-    QString base = qgetenv("XDG_DATA_HOME");
+    auto base = QString{qgetenv("XDG_DATA_HOME")};
     if(base.isEmpty())
     {
         base = qgetenv("HOME");
@@ -215,27 +214,26 @@ QString getBaseDataPath()
     return base;
 }
 
-QStringList getAllDataPaths(const QString &append)
+auto getAllDataPaths(const QString &append) -> QStringList
 {
-    QStringList list;
+    auto list = QStringList{};
     list.append(getBaseDataPath());
 #ifdef Q_OS_WIN32
     // TODO: Common AppData path
 #else
-    QString paths = qgetenv("XDG_DATA_DIRS");
+    auto paths = QString{qgetenv("XDG_DATA_DIRS")};
     if(paths.isEmpty())
         paths = "/usr/local/share/:/usr/share/";
     list += paths.split(QChar(':'), Qt::SkipEmptyParts);
 #endif
-    QStringList::iterator iter = list.begin();
-    while(iter != list.end())
+    for(auto iter = list.begin();iter != list.end();)
     {
         if(iter->isEmpty())
             iter = list.erase(iter);
         else
         {
             iter->append(append);
-            iter++;
+            ++iter;
         }
     }
     return list;
@@ -243,22 +241,20 @@ QStringList getAllDataPaths(const QString &append)
 
 auto getValueFromName(const std::span<const NameValuePair> list, const QString &str) -> QString
 {
-    auto iter = std::ranges::find(list, str, &NameValuePair::name);
-    if(iter != list.end())
+    if(const auto iter = std::ranges::find(list, str, &NameValuePair::name); iter != list.end())
         return iter->value;
     return QString{};
 }
 
 auto getNameFromValue(const std::span<const NameValuePair> list, const QString &str) -> QString
 {
-    auto iter = std::ranges::find(list, str, &NameValuePair::value);
-    if(iter != list.end())
+    if(const auto iter = std::ranges::find(list, str, &NameValuePair::value); iter != list.end())
         return iter->name;
     return QString{};
 }
 
 
-Qt::CheckState getCheckState(const QVariant &var)
+auto getCheckState(const QVariant &var) -> Qt::CheckState
 {
     if(var.isNull())
         return Qt::PartiallyChecked;
@@ -267,7 +263,7 @@ Qt::CheckState getCheckState(const QVariant &var)
     return Qt::Unchecked;
 }
 
-QString getCheckValue(const QCheckBox *checkbox)
+auto getCheckValue(const QCheckBox *checkbox) -> QString
 {
     const Qt::CheckState state{checkbox->checkState()};
     if(state == Qt::Checked)
@@ -1298,7 +1294,7 @@ void MainWindow::removeHrtfFile()
     QList<gsl::owner<QListWidgetItem*>> selected{ui->hrtfFileList->selectedItems()};
     if(!selected.isEmpty())
     {
-        std::for_each(selected.begin(), selected.end(), std::default_delete<QListWidgetItem>{});
+        std::ranges::for_each(selected, std::default_delete<QListWidgetItem>{});
         enableApplyButton();
     }
 }
@@ -1333,7 +1329,7 @@ void MainWindow::showEnabledBackendMenu(QPoint pt)
     if(gotAction == removeAction)
     {
         QList<gsl::owner<QListWidgetItem*>> selected{ui->enabledBackendList->selectedItems()};
-        std::for_each(selected.begin(), selected.end(), std::default_delete<QListWidgetItem>{});
+        std::ranges::for_each(selected, std::default_delete<QListWidgetItem>{});
         enableApplyButton();
     }
     else if(gotAction != nullptr)
@@ -1370,7 +1366,7 @@ void MainWindow::showDisabledBackendMenu(QPoint pt)
     if(gotAction == removeAction)
     {
         QList<gsl::owner<QListWidgetItem*>> selected{ui->disabledBackendList->selectedItems()};
-        std::for_each(selected.begin(), selected.end(), std::default_delete<QListWidgetItem>{});
+        std::ranges::for_each(selected, std::default_delete<QListWidgetItem>{});
         enableApplyButton();
     }
     else if(gotAction != nullptr)

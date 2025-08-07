@@ -1,6 +1,6 @@
 # CMake build file list for OpenAL
 
-cmake_minimum_required(VERSION 3.13)
+cmake_minimum_required(VERSION 3.13...3.31)
 enable_testing()
 
 if(APPLE)
@@ -32,38 +32,6 @@ if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
 elseif(CMAKE_SYSTEM_NAME STREQUAL "WindowsStore")
     set(ALSOFT_UWP TRUE)
 endif()
-
-if(COMMAND CMAKE_POLICY)
-    cmake_policy(SET CMP0003 NEW)
-    cmake_policy(SET CMP0005 NEW)
-    if(POLICY CMP0020)
-        cmake_policy(SET CMP0020 NEW)
-    endif(POLICY CMP0020)
-    if(POLICY CMP0042)
-        cmake_policy(SET CMP0042 NEW)
-    endif(POLICY CMP0042)
-    if(POLICY CMP0054)
-        cmake_policy(SET CMP0054 NEW)
-    endif(POLICY CMP0054)
-    if(POLICY CMP0058)
-        cmake_policy(SET CMP0058 NEW)
-    endif(POLICY CMP0058)
-    if(POLICY CMP0063)
-        cmake_policy(SET CMP0063 NEW)
-    endif(POLICY CMP0063)
-    if(POLICY CMP0075)
-        cmake_policy(SET CMP0075 NEW)
-    endif(POLICY CMP0075)
-    if(POLICY CMP0092)
-        cmake_policy(SET CMP0092 NEW)
-    endif(POLICY CMP0092)
-    if(POLICY CMP0117)
-        cmake_policy(SET CMP0117 NEW)
-    endif(POLICY CMP0117)
-    if(POLICY CMP0155)
-        cmake_policy(SET CMP0155 NEW)
-    endif(POLICY CMP0155)
-endif(COMMAND CMAKE_POLICY)
 
 project(OpenAL)
 
@@ -160,6 +128,15 @@ if(MSVC)
             endif()
         endforeach(flag_var)
     endif()
+endif()
+
+if(WIN32 AND MINGW AND CMAKE_SIZEOF_VOID_P MATCHES "4")
+    # HACK: 32-bit MinGW defines __STDCPP_DEFAULT_NEW_ALIGNMENT__ to 16, while
+    # its default operator new relies on the system/Windows malloc that only
+    # guarantees 8-byte alignment, leading to structs that need 16-byte
+    # alignment being misaligned. This switch overrides that to assume only
+    # 8-byte alignment from the default operator new.
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -faligned-new=8")
 endif()
 
 add_subdirectory(fmt-11.1.4 EXCLUDE_FROM_ALL)
@@ -284,8 +261,13 @@ if(MSVC)
         message(STATUS "Using DirectX SDK directory: ${DXSDK_DIR}")
     endif()
 else()
-    set(C_FLAGS ${C_FLAGS} -Winline -Wunused -Wall -Wextra -Wshadow -Wconversion -Wcast-align
-        -Wpedantic
+    # FIXME: Should include -Winline, but GCC tries inlining too much with
+    # fmtlib due to all the constexpr functions and template classes, spamming
+    # a bunch of warnings that we can't do anything about. Until something like
+    # feeble_inline gets implemented and used, or inline is ignored by default,
+    # we'll have to ignore inline warning.
+    # https://gcc.gnu.org/bugzilla/show_bug.cgi?id=93008
+    set(C_FLAGS ${C_FLAGS} -Wunused -Wall -Wextra -Wshadow -Wconversion -Wcast-align -Wpedantic
         $<$<COMPILE_LANGUAGE:CXX>:-Wold-style-cast -Wnon-virtual-dtor -Woverloaded-virtual>)
 
     check_cxx_compiler_flag(-Wno-interference-size HAVE_WNO_INTERFERENCE_SIZE)
@@ -628,9 +610,20 @@ set(COMMON_OBJS
     common/pragmadefs.h
     common/ringbuffer.h
     common/strutils.cpp
-    common/strutils.h
+    common/strutils.hpp
     common/vecmat.h
-    common/vector.h)
+    common/vector.h
+    gsl/include/gsl/algorithm
+    gsl/include/gsl/assert
+    gsl/include/gsl/byte
+    gsl/include/gsl/gsl
+    gsl/include/gsl/narrow
+    gsl/include/gsl/pointers
+    gsl/include/gsl/span
+    gsl/include/gsl/span_ext
+    gsl/include/gsl/util
+    gsl/include/gsl/zstring
+)
 
 # Core library routines
 set(CORE_OBJS
@@ -681,6 +674,10 @@ set(CORE_OBJS
     core/helpers.h
     core/hrtf.cpp
     core/hrtf.h
+    core/hrtf_loader.cpp
+    core/hrtf_loader.hpp
+    core/hrtf_resource.cpp
+    core/hrtf_resource.hpp
     core/logging.cpp
     core/logging.h
     core/mastering.cpp
@@ -875,7 +872,6 @@ set(HAVE_PULSEAUDIO 0)
 set(HAVE_COREAUDIO  0)
 set(HAVE_OPENSL     0)
 set(HAVE_OBOE       0)
-set(HAVE_OTHERIO    0)
 set(HAVE_WAVE       0)
 set(HAVE_SDL2       0)
 set(HAVE_SDL3       0)
@@ -1065,14 +1061,6 @@ if(WIN32)
             endif()
         endif()
     endif()
-
-    option(ALSOFT_BACKEND_OTHERIO "Enable OtherIO backend" OFF)
-    option(ALSOFT_REQUIRE_OTHERIO "Require OtherIO backend" OFF)
-    if(ALSOFT_BACKEND_OTHERIO)
-        set(HAVE_OTHERIO 1)
-        set(BACKENDS  "${BACKENDS} OtherIO,")
-        set(ALC_OBJS  ${ALC_OBJS} alc/backends/otherio.cpp alc/backends/otherio.h)
-    endif()
 endif()
 if(ALSOFT_REQUIRE_WINMM AND NOT HAVE_WINMM)
     message(FATAL_ERROR "Failed to enable required WinMM backend")
@@ -1082,9 +1070,6 @@ if(ALSOFT_REQUIRE_DSOUND AND NOT HAVE_DSOUND)
 endif()
 if(ALSOFT_REQUIRE_WASAPI AND NOT HAVE_WASAPI)
     message(FATAL_ERROR "Failed to enable required WASAPI backend")
-endif()
-if(ALSOFT_REQUIRE_OTHERIO AND NOT HAVE_OTHERIO)
-    message(FATAL_ERROR "Failed to enable required OtherIO backend")
 endif()
 
 # Check JACK backend
@@ -1385,7 +1370,7 @@ configure_file(
 
 add_library(alsoft.common STATIC EXCLUDE_FROM_ALL ${COMMON_OBJS})
 target_include_directories(alsoft.common PRIVATE ${OpenAL_SOURCE_DIR}/include
-    PUBLIC ${OpenAL_BINARY_DIR} ${OpenAL_SOURCE_DIR}/common)
+    PUBLIC ${OpenAL_BINARY_DIR} ${OpenAL_SOURCE_DIR}/common ${OpenAL_SOURCE_DIR}/gsl/include)
 target_compile_definitions(alsoft.common PRIVATE ${CPP_DEFS})
 target_compile_options(alsoft.common PRIVATE ${C_FLAGS})
 target_link_libraries(alsoft.common PRIVATE alsoft::fmt)
@@ -1405,19 +1390,12 @@ foreach(obj ${CORE_OBJS} ${OPENAL_OBJS} ${ALC_OBJS} ${COMMON_OBJS})
         list(APPEND NEED_ANALYZE_SOURCE_FILES "${CMAKE_CURRENT_SOURCE_DIR}/${obj}")
     endif()
 endforeach()
-IF (ALSOFT_UTILS)
-    list(APPEND NEED_ANALYZE_SOURCE_FILES "${CMAKE_SOURCE_DIR}/utils/openal-info.c")
-endif()
-SET(CLANG_TIDY_EXECUTABLE "clang-tidy")
-if(DEFINED ENV{CLANG_TIDY_EXECUTABLE})
-    SET(CLANG_TIDY_EXECUTABLE $ENV{CLANG_TIDY_EXECUTABLE})
-endif()
-add_custom_target(clang-tidy-check ${CLANG_TIDY_EXECUTABLE} -format-style=file -p ${CMAKE_BINARY_DIR}/compile_commands.json ${NEED_ANALYZE_SOURCE_FILES} DEPENDS ${NEED_ANALYZE_SOURCE_FILES})
 
 # Build main library
 if(LIBTYPE STREQUAL "STATIC")
     add_library(${IMPL_TARGET} STATIC ${COMMON_OBJS} ${OPENAL_OBJS} ${ALC_OBJS} ${CORE_OBJS})
     target_compile_definitions(${IMPL_TARGET} PUBLIC AL_LIBTYPE_STATIC)
+    target_include_directories(${IMPL_TARGET} PRIVATE ${OpenAL_SOURCE_DIR}/gsl/include)
     target_link_libraries(${IMPL_TARGET} PRIVATE ${LINKER_FLAGS} ${EXTRA_LIBS} ${MATH_LIB}
         $<BUILD_LOCAL_INTERFACE:alsoft::fmt>)
 
@@ -1491,8 +1469,9 @@ else()
                 message(FATAL_ERROR "Please install this executable, and run CMake again.")
             endif()
 
-            exec_program(${NUGET_EXE}
-                ARGS install "Microsoft.Windows.CppWinRT" -Version ${ALSOFT_CPPWINRT_VERSION} -ExcludeVersion -OutputDirectory "\"${CMAKE_BINARY_DIR}/packages\"")
+            execute_process(COMMAND ${NUGET_EXE} install "Microsoft.Windows.CppWinRT"
+                -Version ${ALSOFT_CPPWINRT_VERSION} -ExcludeVersion
+                -OutputDirectory "${CMAKE_BINARY_DIR}/packages")
 
             set_target_properties(${IMPL_TARGET} PROPERTIES
                 VS_PROJECT_IMPORT ${CMAKE_BINARY_DIR}/packages/Microsoft.Windows.CppWinRT/build/native/Microsoft.Windows.CppWinRT.props
@@ -1692,6 +1671,7 @@ if(ALSOFT_UTILS)
     target_compile_options(openal-info PRIVATE ${C_FLAGS})
     target_link_libraries(openal-info PRIVATE ${LINKER_FLAGS} OpenAL ${UNICODE_FLAG})
     set_target_properties(openal-info PROPERTIES ${ALSOFT_STD_VERSION_PROPS})
+    list(APPEND NEED_ANALYZE_SOURCE_FILES "${CMAKE_SOURCE_DIR}/utils/openal-info.c")
     if(ALSOFT_INSTALL_EXAMPLES)
         set(EXTRA_INSTALLS ${EXTRA_INSTALLS} openal-info)
     endif()
@@ -1705,6 +1685,7 @@ if(ALSOFT_UTILS)
         target_link_libraries(uhjdecoder PUBLIC alsoft.common
             PRIVATE ${LINKER_FLAGS} SndFile::SndFile ${UNICODE_FLAG} alsoft::fmt)
         set_target_properties(uhjdecoder PROPERTIES ${ALSOFT_STD_VERSION_PROPS})
+        list(APPEND NEED_ANALYZE_SOURCE_FILES "${CMAKE_SOURCE_DIR}/utils/uhjdecoder.cpp")
 
         add_executable(uhjencoder utils/uhjencoder.cpp)
         target_compile_definitions(uhjencoder PRIVATE ${CPP_DEFS})
@@ -1714,6 +1695,7 @@ if(ALSOFT_UTILS)
         target_link_libraries(uhjencoder PUBLIC alsoft.common
             PRIVATE ${LINKER_FLAGS} SndFile::SndFile ${UNICODE_FLAG} alsoft::fmt)
         set_target_properties(uhjencoder PROPERTIES ${ALSOFT_STD_VERSION_PROPS})
+        list(APPEND NEED_ANALYZE_SOURCE_FILES "${CMAKE_SOURCE_DIR}/utils/uhjencoder.cpp")
     endif()
 
     if(MYSOFA_FOUND)
@@ -1727,6 +1709,8 @@ if(ALSOFT_UTILS)
         target_link_libraries(alsoft.sofa-support PUBLIC alsoft.common MySOFA::MySOFA
             PRIVATE ${LINKER_FLAGS} alsoft::fmt)
         set_target_properties(alsoft.sofa-support PROPERTIES ${ALSOFT_STD_VERSION_PROPS})
+        list(APPEND NEED_ANALYZE_SOURCE_FILES "${CMAKE_SOURCE_DIR}/utils/sofa-support.cpp"
+            "${CMAKE_SOURCE_DIR}/utils/sofa-support.h")
 
         set(MAKEMHR_SRCS
             utils/makemhr/loaddef.cpp
@@ -1743,6 +1727,12 @@ if(ALSOFT_UTILS)
         target_link_libraries(makemhr PRIVATE ${LINKER_FLAGS} alsoft.sofa-support ${UNICODE_FLAG}
             alsoft::fmt)
         set_target_properties(makemhr PROPERTIES ${ALSOFT_STD_VERSION_PROPS})
+        list(APPEND NEED_ANALYZE_SOURCE_FILES "${CMAKE_SOURCE_DIR}/utils/makemhr/loaddef.cpp"
+            "${CMAKE_SOURCE_DIR}/utils/makemhr/loaddef.h"
+            "${CMAKE_SOURCE_DIR}/utils/makemhr/loadsofa.cpp"
+            "${CMAKE_SOURCE_DIR}/utils/makemhr/loadsofa.h"
+            "${CMAKE_SOURCE_DIR}/utils/makemhr/makemhr.cpp"
+            "${CMAKE_SOURCE_DIR}/utils/makemhr/makemhr.h")
         if(ALSOFT_INSTALL_EXAMPLES)
             set(EXTRA_INSTALLS ${EXTRA_INSTALLS} makemhr)
         endif()
@@ -1755,6 +1745,7 @@ if(ALSOFT_UTILS)
         target_link_libraries(sofa-info PRIVATE ${LINKER_FLAGS} alsoft.sofa-support
             ${UNICODE_FLAG} alsoft::fmt)
         set_target_properties(sofa-info PROPERTIES ${ALSOFT_STD_VERSION_PROPS})
+        list(APPEND NEED_ANALYZE_SOURCE_FILES "${CMAKE_SOURCE_DIR}/utils/sofa-info.cpp")
     endif()
     message(STATUS "Building utility programs")
 
@@ -1768,7 +1759,8 @@ endif()
 # Add a static library with common functions used by multiple example targets
 add_library(alsoft.excommon STATIC EXCLUDE_FROM_ALL
     examples/common/alhelpers.c
-    examples/common/alhelpers.h)
+    examples/common/alhelpers.h
+    examples/common/alhelpers.hpp)
 target_compile_definitions(alsoft.excommon PUBLIC ${CPP_DEFS})
 target_include_directories(alsoft.excommon PUBLIC ${OpenAL_BINARY_DIR} ${OpenAL_SOURCE_DIR}/common)
 target_compile_options(alsoft.excommon PUBLIC ${C_FLAGS})
@@ -1776,24 +1768,31 @@ target_link_libraries(alsoft.excommon PUBLIC OpenAL PRIVATE ${RT_LIB})
 set_target_properties(alsoft.excommon PROPERTIES ${ALSOFT_STD_VERSION_PROPS})
 
 if(ALSOFT_EXAMPLES)
+    list(APPEND NEED_ANALYZE_SOURCE_FILES "${CMAKE_SOURCE_DIR}/examples/common/alhelpers.c"
+        "${CMAKE_SOURCE_DIR}/examples/common/alhelpers.h")
+
     add_executable(altonegen examples/altonegen.c)
     target_link_libraries(altonegen PRIVATE ${LINKER_FLAGS} ${MATH_LIB} alsoft.excommon
         ${UNICODE_FLAG})
     set_target_properties(altonegen PROPERTIES ${ALSOFT_STD_VERSION_PROPS})
+    list(APPEND NEED_ANALYZE_SOURCE_FILES "${CMAKE_SOURCE_DIR}/examples/altonegen.c")
 
     add_executable(alrecord examples/alrecord.c)
     target_link_libraries(alrecord PRIVATE ${LINKER_FLAGS} alsoft.excommon ${UNICODE_FLAG})
     set_target_properties(alrecord PROPERTIES ${ALSOFT_STD_VERSION_PROPS})
+    list(APPEND NEED_ANALYZE_SOURCE_FILES "${CMAKE_SOURCE_DIR}/examples/alrecord.c")
 
     add_executable(aldebug examples/aldebug.cpp)
-    target_link_libraries(aldebug PRIVATE ${LINKER_FLAGS} alsoft.excommon ${UNICODE_FLAG}
-        alsoft::fmt)
+    target_link_libraries(aldebug PRIVATE ${LINKER_FLAGS} alsoft.common alsoft.excommon
+      ${UNICODE_FLAG} alsoft::fmt)
     set_target_properties(aldebug PROPERTIES ${ALSOFT_STD_VERSION_PROPS})
+    list(APPEND NEED_ANALYZE_SOURCE_FILES "${CMAKE_SOURCE_DIR}/examples/aldebug.cpp")
 
     add_executable(allafplay examples/allafplay.cpp)
     target_link_libraries(allafplay PRIVATE ${LINKER_FLAGS} alsoft.common alsoft.excommon
         ${UNICODE_FLAG} alsoft::fmt)
     set_target_properties(allafplay PROPERTIES ${ALSOFT_STD_VERSION_PROPS})
+    list(APPEND NEED_ANALYZE_SOURCE_FILES "${CMAKE_SOURCE_DIR}/examples/allafplay.cpp")
 
     if(ALSOFT_INSTALL_EXAMPLES)
         set(EXTRA_INSTALLS ${EXTRA_INSTALLS} altonegen alrecord aldebug allafplay)
@@ -1806,46 +1805,55 @@ if(ALSOFT_EXAMPLES)
         target_link_libraries(alplay PRIVATE ${LINKER_FLAGS} SndFile::SndFile alsoft.excommon
             ${UNICODE_FLAG})
         set_target_properties(alplay PROPERTIES ${ALSOFT_STD_VERSION_PROPS})
+        list(APPEND NEED_ANALYZE_SOURCE_FILES "${CMAKE_SOURCE_DIR}/examples/alplay.c")
 
         add_executable(alstream examples/alstream.c)
         target_link_libraries(alstream PRIVATE ${LINKER_FLAGS} SndFile::SndFile alsoft.excommon
             ${UNICODE_FLAG})
         set_target_properties(alstream PROPERTIES ${ALSOFT_STD_VERSION_PROPS})
+        list(APPEND NEED_ANALYZE_SOURCE_FILES "${CMAKE_SOURCE_DIR}/examples/alstream.c")
 
         add_executable(alreverb examples/alreverb.c)
         target_link_libraries(alreverb PRIVATE ${LINKER_FLAGS} SndFile::SndFile alsoft.excommon
             ${UNICODE_FLAG})
         set_target_properties(alreverb PROPERTIES ${ALSOFT_STD_VERSION_PROPS})
+        list(APPEND NEED_ANALYZE_SOURCE_FILES "${CMAKE_SOURCE_DIR}/examples/alreverb.c")
 
         add_executable(almultireverb examples/almultireverb.c)
         target_link_libraries(almultireverb
             PRIVATE ${LINKER_FLAGS} SndFile::SndFile alsoft.excommon ${MATH_LIB} ${UNICODE_FLAG})
         set_target_properties(almultireverb PROPERTIES ${ALSOFT_STD_VERSION_PROPS})
+        list(APPEND NEED_ANALYZE_SOURCE_FILES "${CMAKE_SOURCE_DIR}/examples/almultireverb.c")
 
         add_executable(allatency examples/allatency.c)
         target_link_libraries(allatency PRIVATE ${LINKER_FLAGS} SndFile::SndFile alsoft.excommon
             ${UNICODE_FLAG})
         set_target_properties(allatency PROPERTIES ${ALSOFT_STD_VERSION_PROPS})
+        list(APPEND NEED_ANALYZE_SOURCE_FILES "${CMAKE_SOURCE_DIR}/examples/allatency.c")
 
         add_executable(alhrtf examples/alhrtf.c)
         target_link_libraries(alhrtf
             PRIVATE ${LINKER_FLAGS} SndFile::SndFile alsoft.excommon ${MATH_LIB} ${UNICODE_FLAG})
         set_target_properties(alhrtf PROPERTIES ${ALSOFT_STD_VERSION_PROPS})
+        list(APPEND NEED_ANALYZE_SOURCE_FILES "${CMAKE_SOURCE_DIR}/examples/alhrtf.c")
 
         add_executable(alstreamcb examples/alstreamcb.cpp)
-        target_link_libraries(alstreamcb PRIVATE ${LINKER_FLAGS} SndFile::SndFile alsoft.excommon
-            ${UNICODE_FLAG} alsoft::fmt)
+        target_link_libraries(alstreamcb PRIVATE ${LINKER_FLAGS} SndFile::SndFile alsoft.common
+            alsoft.excommon ${UNICODE_FLAG} alsoft::fmt)
         set_target_properties(alstreamcb PROPERTIES ${ALSOFT_STD_VERSION_PROPS})
+        list(APPEND NEED_ANALYZE_SOURCE_FILES "${CMAKE_SOURCE_DIR}/examples/alstreamcb.cpp")
 
         add_executable(aldirect examples/aldirect.cpp)
-        target_link_libraries(aldirect PRIVATE ${LINKER_FLAGS} SndFile::SndFile alsoft.excommon
-            ${UNICODE_FLAG} alsoft::fmt)
+        target_link_libraries(aldirect PRIVATE ${LINKER_FLAGS} SndFile::SndFile alsoft.common
+            alsoft.excommon ${UNICODE_FLAG} alsoft::fmt)
         set_target_properties(aldirect PROPERTIES ${ALSOFT_STD_VERSION_PROPS})
+        list(APPEND NEED_ANALYZE_SOURCE_FILES "${CMAKE_SOURCE_DIR}/examples/aldirect.cpp")
 
         add_executable(alconvolve examples/alconvolve.c)
         target_link_libraries(alconvolve PRIVATE ${LINKER_FLAGS} alsoft.common SndFile::SndFile
             alsoft.excommon ${UNICODE_FLAG})
         set_target_properties(alconvolve PROPERTIES ${ALSOFT_STD_VERSION_PROPS})
+        list(APPEND NEED_ANALYZE_SOURCE_FILES "${CMAKE_SOURCE_DIR}/examples/alconvolve.c")
 
         if(ALSOFT_INSTALL_EXAMPLES)
             set(EXTRA_INSTALLS ${EXTRA_INSTALLS} alplay alstream alreverb almultireverb allatency
@@ -1863,6 +1871,7 @@ if(ALSOFT_EXAMPLES)
         target_link_libraries(alloopback
             PRIVATE ${LINKER_FLAGS} SDL3::SDL3 alsoft.excommon ${MATH_LIB})
         set_target_properties(alloopback PROPERTIES ${ALSOFT_STD_VERSION_PROPS})
+        list(APPEND NEED_ANALYZE_SOURCE_FILES "${CMAKE_SOURCE_DIR}/examples/alloopback.c")
 
         if(ALSOFT_INSTALL_EXAMPLES)
             set(EXTRA_INSTALLS ${EXTRA_INSTALLS} alloopback)
@@ -1896,8 +1905,10 @@ if(ALSOFT_EXAMPLES)
             add_executable(alffplay examples/alffplay.cpp)
             target_include_directories(alffplay PRIVATE ${FFMPEG_INCLUDE_DIRS})
             target_link_libraries(alffplay
-                PRIVATE ${LINKER_FLAGS} SDL3::SDL3 ${FFMPEG_LIBRARIES} alsoft.excommon alsoft::fmt)
+                PRIVATE ${LINKER_FLAGS} SDL3::SDL3 ${FFMPEG_LIBRARIES} alsoft.common
+                alsoft.excommon alsoft::fmt)
             set_target_properties(alffplay PROPERTIES ${ALSOFT_STD_VERSION_PROPS})
+            list(APPEND NEED_ANALYZE_SOURCE_FILES "${CMAKE_SOURCE_DIR}/examples/alffplay.cpp")
 
             if(ALSOFT_INSTALL_EXAMPLES)
                 set(EXTRA_INSTALLS ${EXTRA_INSTALLS} alffplay)
@@ -1907,6 +1918,12 @@ if(ALSOFT_EXAMPLES)
     endif()
     message(STATUS "")
 endif()
+
+set(CLANG_TIDY_EXECUTABLE "clang-tidy")
+if(DEFINED ENV{CLANG_TIDY_EXECUTABLE})
+    set(CLANG_TIDY_EXECUTABLE $ENV{CLANG_TIDY_EXECUTABLE})
+endif()
+add_custom_target(clang-tidy-check ${CLANG_TIDY_EXECUTABLE} -format-style=file -p ${CMAKE_BINARY_DIR}/compile_commands.json ${NEED_ANALYZE_SOURCE_FILES} DEPENDS ${NEED_ANALYZE_SOURCE_FILES})
 
 if(ALSOFT_TESTS)
 add_subdirectory(tests)

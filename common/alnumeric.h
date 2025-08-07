@@ -10,6 +10,7 @@
 #include <concepts>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <string_view>
 #include <type_traits>
 #ifdef HAVE_INTRIN_H
@@ -19,23 +20,114 @@
 #include <emmintrin.h>
 #endif
 
+#include "gsl/gsl"
 #include "opthelpers.h"
 
 
-constexpr auto operator "" _i64(unsigned long long n) noexcept { return static_cast<std::int64_t>(n); }
-constexpr auto operator "" _u64(unsigned long long n) noexcept { return static_cast<std::uint64_t>(n); }
+consteval auto operator "" _i64(unsigned long long n) noexcept { return gsl::narrow<std::int64_t>(n); }
+consteval auto operator "" _u64(unsigned long long n) noexcept { return gsl::narrow<std::uint64_t>(n); }
 
-constexpr auto operator "" _z(unsigned long long n) noexcept
-{ return static_cast<std::make_signed_t<std::size_t>>(n); }
-constexpr auto operator "" _uz(unsigned long long n) noexcept { return static_cast<std::size_t>(n); }
-constexpr auto operator "" _zu(unsigned long long n) noexcept { return static_cast<std::size_t>(n); }
+consteval auto operator "" _z(unsigned long long n) noexcept
+{ return gsl::narrow<std::make_signed_t<std::size_t>>(n); }
+consteval auto operator "" _uz(unsigned long long n) noexcept { return gsl::narrow<std::size_t>(n); }
+consteval auto operator "" _zu(unsigned long long n) noexcept { return gsl::narrow<std::size_t>(n); }
 
+
+namespace al {
+
+#if HAS_BUILTIN(__builtin_add_overflow)
+template<std::integral T>
+constexpr auto add_sat(T lhs, T rhs) noexcept -> T
+{
+    T res;
+    if(!__builtin_add_overflow(lhs, rhs, &res))
+        return res;
+    if constexpr(std::is_signed_v<T>)
+    {
+        if(rhs < 0)
+            return std::numeric_limits<T>::min();
+    }
+    return std::numeric_limits<T>::max();
+}
+
+#else
+
+template<std::integral T>
+constexpr auto add_sat(T lhs, T rhs) noexcept -> T
+{
+    if constexpr(std::is_signed_v<T>)
+    {
+        if(rhs < 0)
+        {
+            if(lhs < std::numeric_limits<T>::min()-rhs)
+                return std::numeric_limits<T>::min();
+            return lhs + rhs;
+        }
+        if(lhs > std::numeric_limits<T>::max()-rhs)
+            return std::numeric_limits<T>::max();
+        return lhs + rhs;
+    }
+    else
+    {
+        const auto res = lhs + rhs;
+        if(res < lhs)
+            return std::numeric_limits<T>::max();
+        return res;
+    }
+}
+#endif
+
+template<std::integral R, std::integral T>
+constexpr auto saturate_cast(T val) noexcept -> R
+{
+    if constexpr(std::is_signed_v<R> == std::is_signed_v<T>)
+    {
+        if constexpr(std::numeric_limits<R>::digits < std::numeric_limits<T>::digits)
+        {
+            if constexpr(std::is_signed_v<R>)
+            {
+                if(val < std::numeric_limits<R>::min())
+                    return std::numeric_limits<R>::min();
+            }
+            if(val > std::numeric_limits<R>::max())
+                return std::numeric_limits<R>::max();
+        }
+    }
+    else if constexpr(std::is_signed_v<R>)
+    {
+        if constexpr(std::numeric_limits<R>::digits < std::numeric_limits<T>::digits)
+        {
+            if(val > T{std::numeric_limits<R>::max()})
+                return std::numeric_limits<R>::max();
+        }
+    }
+    else
+    {
+        if constexpr(std::numeric_limits<R>::digits < std::numeric_limits<T>::digits)
+        {
+            if(val > T{std::numeric_limits<R>::max()})
+                return std::numeric_limits<R>::max();
+        }
+        if(val < 0)
+            return R{0};
+    }
+    return gsl::narrow_cast<R>(val);
+}
+
+} /* namespace al */
 
 template<std::integral T>
 constexpr auto as_unsigned(T value) noexcept
 {
     using UT = std::make_unsigned_t<T>;
     return static_cast<UT>(value);
+}
+
+template<std::integral T>
+constexpr auto as_signed(T value) noexcept
+{
+    using ST = std::make_signed_t<T>;
+    return static_cast<ST>(value);
 }
 
 
@@ -54,7 +146,7 @@ constexpr auto lerpf(float val1, float val2, float mu) noexcept -> float
 
 
 /** Find the next power-of-2 for non-power-of-2 numbers. */
-inline uint32_t NextPowerOf2(uint32_t value) noexcept
+constexpr auto NextPowerOf2(uint32_t value) noexcept -> uint32_t
 {
     if(value > 0)
     {
@@ -69,19 +161,24 @@ inline uint32_t NextPowerOf2(uint32_t value) noexcept
 }
 
 /**
- * If the value is not already a multiple of r, round down to the next
+ * If the value is not already a multiple of r, round toward zero to the next
  * multiple.
  */
-template<typename T>
-constexpr T RoundDown(T value, std::type_identity_t<T> r) noexcept
+template<std::integral T>
+constexpr auto RoundToZero(T value, std::type_identity_t<T> r) noexcept -> T
 { return value - (value%r); }
 
 /**
- * If the value is not already a multiple of r, round up to the next multiple.
+ * If the value is not already a multiple of r, round away from zero to the
+ * next multiple.
  */
-template<typename T>
-constexpr T RoundUp(T value, std::type_identity_t<T> r) noexcept
-{ return RoundDown(value + r-1, r); }
+template<std::integral T>
+constexpr auto RoundFromZero(T value, std::type_identity_t<T> r) noexcept -> T
+{
+    if(value >= 0)
+        return RoundToZero(value + r-1, r);
+    return RoundToZero(value - r+1, r);
+}
 
 
 /**
@@ -111,11 +208,11 @@ inline int fastf2i(float f) noexcept
 
 #else
 
-    return static_cast<int>(f);
+    return gsl::narrow_cast<int>(f);
 #endif
 }
 inline unsigned int fastf2u(float f) noexcept
-{ return static_cast<unsigned int>(fastf2i(f)); }
+{ return gsl::narrow_cast<unsigned int>(fastf2i(f)); }
 
 /** Converts float-to-int using standard behavior (truncation). */
 inline int float2int(float f) noexcept
@@ -128,25 +225,25 @@ inline int float2int(float f) noexcept
         && !defined(__SSE_MATH__))
     const auto conv_i = std::bit_cast<int>(f);
 
-    const int sign{(conv_i>>31) | 1};
-    const int shift{((conv_i>>23)&0xff) - (127+23)};
+    const auto sign = (conv_i>>31) | 1;
+    const auto shift = ((conv_i>>23)&0xff) - (127+23);
 
     /* Over/underflow */
     if(shift >= 31 || shift < -23) [[unlikely]]
         return 0;
 
-    const int mant{(conv_i&0x7fffff) | 0x800000};
+    const auto mant = (conv_i&0x7fffff) | 0x800000;
     if(shift < 0) [[likely]]
         return (mant >> -shift) * sign;
     return (mant << shift) * sign;
 
 #else
 
-    return static_cast<int>(f);
+    return gsl::narrow_cast<int>(f);
 #endif
 }
 inline unsigned int float2uint(float f) noexcept
-{ return static_cast<unsigned int>(float2int(f)); }
+{ return gsl::narrow_cast<unsigned int>(float2int(f)); }
 
 /** Converts double-to-int using standard behavior (truncation). */
 inline int double2int(double d) noexcept
@@ -159,21 +256,21 @@ inline int double2int(double d) noexcept
         && !defined(__SSE2_MATH__))
     const auto conv_i64 = std::bit_cast<int64_t>(d);
 
-    const int sign{static_cast<int>(conv_i64 >> 63) | 1};
-    const int shift{(static_cast<int>(conv_i64 >> 52) & 0x7ff) - (1023 + 52)};
+    const auto sign = gsl::narrow_cast<int>(conv_i64 >> 63) | 1;
+    const auto shift = (gsl::narrow_cast<int>(conv_i64 >> 52) & 0x7ff) - (1023 + 52);
 
     /* Over/underflow */
     if(shift >= 63 || shift < -52) [[unlikely]]
         return 0;
 
-    const int64_t mant{(conv_i64 & 0xfffffffffffff_i64) | 0x10000000000000_i64};
+    const auto mant = (conv_i64 & 0xfffffffffffff_i64) | 0x10000000000000_i64;
     if(shift < 0) [[likely]]
-        return static_cast<int>(mant >> -shift) * sign;
-    return static_cast<int>(mant << shift) * sign;
+        return gsl::narrow_cast<int>(mant >> -shift) * sign;
+    return gsl::narrow_cast<int>(mant << shift) * sign;
 
 #else
 
-    return static_cast<int>(d);
+    return gsl::narrow_cast<int>(d);
 #endif
 }
 
@@ -202,14 +299,14 @@ inline float fast_roundf(float f) noexcept
     /* Integral limit, where sub-integral precision is not available for
      * floats.
      */
-    static constexpr std::array ilim{
+    static constexpr auto ilim = std::array{
          8388608.0f /*  0x1.0p+23 */,
         -8388608.0f /* -0x1.0p+23 */
     };
-    const auto conv_i = std::bit_cast<unsigned int>(f);
+    const auto conv_u = std::bit_cast<unsigned int>(f);
 
-    const unsigned int sign{(conv_i>>31)&0x01};
-    const unsigned int expo{(conv_i>>23)&0xff};
+    const auto sign = (conv_u>>31u)&0x01u;
+    const auto expo = (conv_u>>23u)&0xffu;
 
     if(expo >= 150/*+23*/) [[unlikely]]
     {
